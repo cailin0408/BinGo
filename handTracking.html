@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>主動式跟隨垃圾桶 - 手勢控制器 (單機測試版)</title>
+
+  <!-- 引入 MediaPipe 關鍵庫 -->
+  <script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      text-align: center;
+      background-color: #1e1e2e;
+      color: #cdd6f4;
+      margin: 0;
+      padding: 20px;
+    }
+
+    h1 {
+      color: #89b4fa;
+      margin-bottom: 5px;
+    }
+
+    p {
+      color: #a6adc8;
+      margin-top: 0;
+    }
+
+    #control_panel {
+      margin: 15px 0;
+    }
+
+    #start_btn {
+      font-size: 18px;
+      font-weight: bold;
+      padding: 12px 28px;
+      cursor: pointer;
+      background-color: #a6e3a1;
+      color: #11111b;
+      border: none;
+      border-radius: 8px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+      transition: all 0.2s ease;
+    }
+
+    #start_btn:hover {
+      background-color: #94e2d5;
+      transform: translateY(-2px);
+    }
+
+    #start_btn:disabled {
+      background-color: #585b70;
+      color: #a6adc8;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    #gesture_status {
+      font-size: 26px;
+      font-weight: bold;
+      color: #f9e2af;
+      margin: 15px 0;
+      min-height: 38px;
+    }
+
+    #canvas_container {
+      position: relative;
+      display: inline-block;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      background-color: #181825;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    /* 手勢提示卡片區塊 */
+    .gesture-guide {
+      display: flex;
+      justify-content: center;
+      gap: 15px;
+      margin: 20px auto 0;
+      max-width: 640px;
+    }
+
+    .card {
+      background: #313244;
+      border: 2px solid #45475a;
+      border-radius: 10px;
+      padding: 12px;
+      flex: 1;
+      color: #cdd6f4;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+
+    .card .icon {
+      font-size: 32px;
+      margin-bottom: 5px;
+    }
+
+    .card .cmd {
+      font-weight: bold;
+      color: #89b4fa;
+      font-size: 18px;
+    }
+
+    .card .desc {
+      font-size: 14px;
+      color: #a6adc8;
+      margin-top: 4px;
+    }
+
+    /* 當前觸發的手勢卡片高亮 */
+    .card.active {
+      border-color: #a6e3a1;
+      background: #45475a;
+      transform: scale(1.05);
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>🗑️ 主動式跟隨垃圾桶 - Web 手勢控制台</h1>
+
+  <div id="control_panel">
+    <button id="start_btn"> 啟動 AI 攝影機</button>
+  </div>
+
+  <div id="gesture_status">等待點擊啟動...</div>
+
+  <div id="canvas_container">
+    <video id="input_video" style="display:none;"></video>
+    <canvas id="output_canvas" width="640" height="480"></canvas>
+  </div>
+
+  <!-- 手勢圖解卡片 -->
+  <div class="gesture-guide">
+    <div class="card" id="card-COME">
+      <div class="icon">✋</div>
+      <div class="cmd">COME</div>
+      <div class="desc">張手 ➔ 前進跟隨</div>
+    </div>
+    <div class="card" id="card-STOP">
+      <div class="icon">✊</div>
+      <div class="cmd">STOP</div>
+      <div class="desc">握拳 ➔ 煞車停止</div>
+    </div>
+    <div class="card" id="card-OPEN_LID">
+      <div class="icon">👍</div>
+      <div class="cmd">OPEN_LID</div>
+      <div class="desc">比讚 ➔ 自動掀蓋</div>
+    </div>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const statusText = document.getElementById('gesture_status');
+    const startBtn = document.getElementById('start_btn');
+
+    let lastGestureCmd = "";
+
+    // 手指關鍵點常數
+    const LANDMARK = {
+      THUMB_TIP: 4,
+      INDEX_FINGER_PIP: 6,
+      INDEX_FINGER_TIP: 8,
+      MIDDLE_FINGER_PIP: 10,
+      MIDDLE_FINGER_TIP: 12,
+      RING_FINGER_PIP: 14,
+      RING_FINGER_TIP: 16,
+      PINKY_PIP: 18,
+      PINKY_TIP: 20
+    };
+
+    // 初始化 MediaPipe Hands
+    const hands = new Hands({
+      locateFile: (file) => `https://unpkg.com/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,     
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(onResults);
+
+    // 初始化攝影機
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await hands.send({ image: videoElement });
+      },
+      width: 640,
+      height: 480
+    });
+
+    // 點擊按鈕才啟動（解決瀏覽器自動播放限制）
+    startBtn.addEventListener('click', async () => {
+      statusText.innerText = " 正在初始化 AI 模型與鏡頭...";
+      startBtn.disabled = true;
+
+      try {
+        await camera.start();
+        statusText.innerText = " 系統就緒！請將手伸進畫面中";
+      } catch (error) {
+        statusText.innerText = " 啟動失敗，請確認攝影機權限！";
+        console.error("Camera Error:", error);
+      }
+    });
+
+    // 分析結果處理函式
+    function onResults(results) {
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      // 畫面鏡像翻轉
+      canvasCtx.translate(canvasElement.width, 0);
+      canvasCtx.scale(-1, 1);
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+
+        // 繪製手掌骨架與關節
+        drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, { color: '#a6e3a1', lineWidth: 4 });
+        drawLandmarks(canvasCtx, landmarks, { color: '#f38ba8', lineWidth: 1, radius: 4 });
+
+        canvasCtx.restore();
+
+        // 判斷手勢
+        const gesture = predictGesture(landmarks);
+
+        // 手勢變更時更新介面與 Console
+        if (gesture.cmd !== lastGestureCmd) {
+          statusText.innerText = `當前手勢：${gesture.name}`;
+          console.log(`[手勢變更] 指令: ${gesture.cmd}`);
+
+          // 更新下方 UI 卡片的高亮狀態
+          updateCardHighlight(gesture.cmd);
+
+          lastGestureCmd = gesture.cmd;
+        }
+      } else {
+        canvasCtx.restore();
+        statusText.innerText = " 等待手掌進入畫面...";
+        if (lastGestureCmd !== "") {
+          updateCardHighlight("");
+          lastGestureCmd = "";
+        }
+      }
+    }
+
+   // 手勢判斷邏輯
+
+function predictGesture(landmarks) {
+  
+  // 四指（食指、中指、無名指、小指）伸直判斷
+  const isIndexStraight  = landmarks[LANDMARK.INDEX_FINGER_TIP].y < landmarks[LANDMARK.INDEX_FINGER_PIP].y;
+
+  const isMiddleStraight = landmarks[LANDMARK.MIDDLE_FINGER_TIP].y < landmarks[LANDMARK.MIDDLE_FINGER_PIP].y;
+
+  const isRingStraight   = landmarks[LANDMARK.RING_FINGER_TIP].y < landmarks[LANDMARK.RING_FINGER_PIP].y;
+
+  const isPinkyStraight  = landmarks[LANDMARK.PINKY_TIP].y < landmarks[LANDMARK.PINKY_PIP].y;
+
+  // 計算大拇指指尖與食指根部 (INDEX_FINGER_PIP) 的距離與相對位置
+  const thumbTip = landmarks[LANDMARK.THUMB_TIP];
+  const indexPip = landmarks[LANDMARK.INDEX_FINGER_PIP];
+
+  // 布 (五指全開) -> 跟隨模式 (COME)
+  const isThumbOut = Math.abs(thumbTip.x - indexPip.x) > 0.1; // 大拇指橫向外張
+  if (isIndexStraight && isMiddleStraight && isRingStraight && isPinkyStraight && isThumbOut) {
+    return { name: "布 ✋ (前進跟隨)", cmd: "COME" };
+  }
+
+  // 四指皆收攏狀態
+  const areFourFingersClosed = !isIndexStraight && !isMiddleStraight && !isRingStraight && !isPinkyStraight;
+  if (areFourFingersClosed) {
+    // 讚 (四指收起 + 大拇指顯著朝上且與食指分開) -> 自動開蓋 (OPEN_LID)
+    const isThumbUp = (indexPip.y - thumbTip.y) > 0.08;
+
+    if (isThumbUp) {
+      return { name: "讚 👍 (自動開蓋)", cmd: "OPEN_LID" };
+    }
+
+    // 石頭 (四指收起 + 大拇指沒有豎起) -> 煞車停止 (STOP)
+    return { name: "石頭 ✊ (煞車停止)", cmd: "STOP" };
+  }
+
+  return { name: "未辨識手勢...", cmd: "UNKNOWN" };
+}
+
+    // 更新網頁 UI
+    function updateCardHighlight(activeCmd) {
+      document.querySelectorAll('.card').forEach(card => card.classList.remove('active'));
+      if (activeCmd && activeCmd !== "UNKNOWN") {
+        const activeCard = document.getElementById(`card-${activeCmd}`);
+        if (activeCard) activeCard.classList.add('active');
+      }
+    }
+  </script>
+</body>
+
+</html>
