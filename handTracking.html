@@ -4,12 +4,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>主動式跟隨垃圾桶 - 手勢控制器 (單機測試版)</title>
+  <title>主動式跟隨垃圾桶 - 手勢控制器 (MQTT 連線版)</title>
 
   <!-- 引入 MediaPipe 關鍵庫 -->
   <script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <!-- 引入 MQTT.js CDN 套件 -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 
   <style>
     * {
@@ -37,19 +40,35 @@
 
     #control_panel {
       margin: 15px 0;
+      display: flex;
+      justify-content: center;
+      gap: 12px;
     }
 
-    #start_btn {
-      font-size: 18px;
+    button {
+      font-size: 16px;
       font-weight: bold;
-      padding: 12px 28px;
+      padding: 12px 24px;
       cursor: pointer;
-      background-color: #a6e3a1;
-      color: #11111b;
       border: none;
       border-radius: 8px;
       box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
       transition: all 0.2s ease;
+    }
+
+    #connect_btn {
+      background-color: #89b4fa;
+      color: #11111b;
+    }
+
+    #connect_btn:hover {
+      background-color: #b4befe;
+      transform: translateY(-2px);
+    }
+
+    #start_btn {
+      background-color: #a6e3a1;
+      color: #11111b;
     }
 
     #start_btn:hover {
@@ -57,19 +76,25 @@
       transform: translateY(-2px);
     }
 
-    #start_btn:disabled {
-      background-color: #585b70;
-      color: #a6adc8;
+    button:disabled {
+      background-color: #585b70 !important;
+      color: #a6adc8 !important;
       cursor: not-allowed;
-      transform: none;
+      transform: none !important;
     }
 
     #gesture_status {
-      font-size: 26px;
+      font-size: 24px;
       font-weight: bold;
       color: #f9e2af;
-      margin: 15px 0;
-      min-height: 38px;
+      margin: 10px 0;
+      min-height: 36px;
+    }
+
+    #mqtt_status {
+      font-size: 15px;
+      color: #f38ba8;
+      margin-bottom: 10px;
     }
 
     #canvas_container {
@@ -133,12 +158,14 @@
 
 <body>
 
-  <h1>🗑️ 主動式跟隨垃圾桶 - Web 手勢控制台</h1>
+  <h1>🗑️ BinGo!! - Web 手勢控制台</h1>
 
   <div id="control_panel">
-    <button id="start_btn"> 啟動 AI 攝影機</button>
+    <button id="connect_btn">🔌 連接 MQTT Broker</button>
+    <button id="start_btn">📷 啟動 AI 攝影機</button>
   </div>
 
+  <div id="mqtt_status">❌ MQTT 服務：未連線</div>
   <div id="gesture_status">等待點擊啟動...</div>
 
   <div id="canvas_container">
@@ -156,12 +183,12 @@
     <div class="card" id="card-STOP">
       <div class="icon">✊</div>
       <div class="cmd">STOP</div>
-      <div class="desc">握拳 ➔ 煞車停止</div>
+      <div class="desc">握拳 ➔ 煞車關蓋 (0°)</div>
     </div>
     <div class="card" id="card-OPEN_LID">
       <div class="icon">👍</div>
       <div class="cmd">OPEN_LID</div>
-      <div class="desc">比讚 ➔ 自動掀蓋</div>
+      <div class="desc">比讚 ➔ 自動掀蓋 (90°)</div>
     </div>
   </div>
 
@@ -170,9 +197,17 @@
     const canvasElement = document.getElementById('output_canvas');
     const canvasCtx = canvasElement.getContext('2d');
     const statusText = document.getElementById('gesture_status');
+    const mqttStatusText = document.getElementById('mqtt_status');
     const startBtn = document.getElementById('start_btn');
+    const connectBtn = document.getElementById('connect_btn');
 
     let lastGestureCmd = "";
+    let mqttClient = null;
+
+    //  樹莓派與 MQTT Topic 設定
+    const RPI_IP = '192.168.69.144';  // 測試時改為樹莓派 IP，如 '192.168.1.100'
+    const MQTT_PORT = 9001;        // Mosquitto 支援 WebSocket 的埠號
+    const MQTT_TOPIC = 'bingo/command'; // 與樹莓派/Pico W 約定好的 Topic
 
     // 手指關鍵點常數
     const LANDMARK = {
@@ -187,13 +222,59 @@
       PINKY_TIP: 20
     };
 
-    // 初始化 MediaPipe Hands
+    // ================= MQTT (over WebSocket) 連線邏輯 =================
+    connectBtn.addEventListener('click', () => {
+      mqttStatusText.innerText = "⏳ 正在連接 MQTT Broker...";
+      mqttStatusText.style.color = "#f9e2af";
+
+      // 建立 MQTT Client 連線
+      mqttClient = mqtt.connect(`ws://${RPI_IP}:${MQTT_PORT}`);
+
+      mqttClient.on('connect', () => {
+        connectBtn.innerText = "✅ MQTT 已成功連線";
+        connectBtn.style.backgroundColor = "#a6e3a1";
+        connectBtn.disabled = true;
+
+        mqttStatusText.innerText = `🟢 MQTT 已成功連線至 ws://${RPI_IP}:${MQTT_PORT}`;
+        mqttStatusText.style.color = "#a6e3a1";
+        console.log(`[MQTT] 連線成功！Topic 設為: ${MQTT_TOPIC}`);
+      });
+
+      mqttClient.on('error', (err) => {
+        console.error("MQTT 連線錯誤:", err);
+        mqttStatusText.innerText = "❌ MQTT 連線失敗，請檢查 Mosquitto Broker！";
+        mqttStatusText.style.color = "#f38ba8";
+      });
+
+      mqttClient.on('close', () => {
+        console.log("MQTT 連線關閉");
+      });
+    });
+
+    // 透過 MQTT 發送指令 (Publish)
+    function sendCmdViaMQTT(cmd) {
+      if (!mqttClient || !mqttClient.connected) {
+        console.warn("[MQTT 未連線] 指令暫未發送:", cmd);
+        return;
+      }
+
+      // 發送 Topic 訊息
+      mqttClient.publish(MQTT_TOPIC, cmd, { qos: 0 }, (err) => {
+        if (!err) {
+          console.log(`[MQTT 發送成功] Topic: ${MQTT_TOPIC} ➔ Payload: ${cmd}`);
+        } else {
+          console.error("MQTT 發送失敗:", err);
+        }
+      });
+    }
+
+    // ================= MediaPipe Hands 設定 =================
     const hands = new Hands({
       locateFile: (file) => `https://unpkg.com/@mediapipe/hands/${file}`
     });
 
     hands.setOptions({
-      maxNumHands: 1,     
+      maxNumHands: 1,
       modelComplexity: 1,
       minDetectionConfidence: 0.7,
       minTrackingConfidence: 0.7
@@ -210,16 +291,15 @@
       height: 480
     });
 
-    // 點擊按鈕才啟動（解決瀏覽器自動播放限制）
     startBtn.addEventListener('click', async () => {
-      statusText.innerText = " 正在初始化 AI 模型與鏡頭...";
+      statusText.innerText = "⏳ 正在初始化 AI 模型與鏡頭...";
       startBtn.disabled = true;
 
       try {
         await camera.start();
-        statusText.innerText = " 系統就緒！請將手伸進畫面中";
+        statusText.innerText = "系統就緒！請將手伸進畫面中";
       } catch (error) {
-        statusText.innerText = " 啟動失敗，請確認攝影機權限！";
+        statusText.innerText = "啟動失敗，請確認攝影機權限！";
         console.error("Camera Error:", error);
       }
     });
@@ -246,10 +326,15 @@
         // 判斷手勢
         const gesture = predictGesture(landmarks);
 
-        // 手勢變更時更新介面與 Console
+        // 手勢變更時更新介面、Console 並透過 MQTT 發送指令
         if (gesture.cmd !== lastGestureCmd) {
           statusText.innerText = `當前手勢：${gesture.name}`;
           console.log(`[手勢變更] 指令: ${gesture.cmd}`);
+
+          // 發送 MQTT 指令
+          if (gesture.cmd !== "UNKNOWN") {
+            sendCmdViaMQTT(gesture.cmd);
+          }
 
           // 更新下方 UI 卡片的高亮狀態
           updateCardHighlight(gesture.cmd);
@@ -258,7 +343,7 @@
         }
       } else {
         canvasCtx.restore();
-        statusText.innerText = " 等待手掌進入畫面...";
+        statusText.innerText = "等待手掌進入畫面...";
         if (lastGestureCmd !== "") {
           updateCardHighlight("");
           lastGestureCmd = "";
@@ -266,47 +351,39 @@
       }
     }
 
-   // 手勢判斷邏輯
+    // 手勢判斷邏輯
+    function predictGesture(landmarks) {
+      const isIndexStraight = landmarks[LANDMARK.INDEX_FINGER_TIP].y < landmarks[LANDMARK.INDEX_FINGER_PIP].y;
+      const isMiddleStraight = landmarks[LANDMARK.MIDDLE_FINGER_TIP].y < landmarks[LANDMARK.MIDDLE_FINGER_PIP].y;
+      const isRingStraight = landmarks[LANDMARK.RING_FINGER_TIP].y < landmarks[LANDMARK.RING_FINGER_PIP].y;
+      const isPinkyStraight = landmarks[LANDMARK.PINKY_TIP].y < landmarks[LANDMARK.PINKY_PIP].y;
 
-function predictGesture(landmarks) {
-  
-  // 四指（食指、中指、無名指、小指）伸直判斷
-  const isIndexStraight  = landmarks[LANDMARK.INDEX_FINGER_TIP].y < landmarks[LANDMARK.INDEX_FINGER_PIP].y;
+      const thumbTip = landmarks[LANDMARK.THUMB_TIP];
+      const indexPip = landmarks[LANDMARK.INDEX_FINGER_PIP];
 
-  const isMiddleStraight = landmarks[LANDMARK.MIDDLE_FINGER_TIP].y < landmarks[LANDMARK.MIDDLE_FINGER_PIP].y;
+      // 布 (五指全開) -> 跟隨模式 (COME)
+      const isThumbOut = Math.abs(thumbTip.x - indexPip.x) > 0.1;
+      if (isIndexStraight && isMiddleStraight && isRingStraight && isPinkyStraight && isThumbOut) {
+        return { name: "布 ✋ (前進跟隨)", cmd: "COME" };
+      }
 
-  const isRingStraight   = landmarks[LANDMARK.RING_FINGER_TIP].y < landmarks[LANDMARK.RING_FINGER_PIP].y;
+      // 四指皆收攏狀態
+      const areFourFingersClosed = !isIndexStraight && !isMiddleStraight && !isRingStraight && !isPinkyStraight;
+      if (areFourFingersClosed) {
+        // 讚 -> 自動開蓋 (OPEN_LID)
+        const isThumbUp = (indexPip.y - thumbTip.y) > 0.08;
+        if (isThumbUp) {
+          return { name: "讚 👍 (自動開蓋)", cmd: "OPEN_LID" };
+        }
 
-  const isPinkyStraight  = landmarks[LANDMARK.PINKY_TIP].y < landmarks[LANDMARK.PINKY_PIP].y;
+        // 石頭 -> 煞車關蓋 (STOP)
+        return { name: "石頭 ✊ (煞車關蓋)", cmd: "STOP" };
+      }
 
-  // 計算大拇指指尖與食指根部 (INDEX_FINGER_PIP) 的距離與相對位置
-  const thumbTip = landmarks[LANDMARK.THUMB_TIP];
-  const indexPip = landmarks[LANDMARK.INDEX_FINGER_PIP];
-
-  // 布 (五指全開) -> 跟隨模式 (COME)
-  const isThumbOut = Math.abs(thumbTip.x - indexPip.x) > 0.1; // 大拇指橫向外張
-  if (isIndexStraight && isMiddleStraight && isRingStraight && isPinkyStraight && isThumbOut) {
-    return { name: "布 ✋ (前進跟隨)", cmd: "COME" };
-  }
-
-  // 四指皆收攏狀態
-  const areFourFingersClosed = !isIndexStraight && !isMiddleStraight && !isRingStraight && !isPinkyStraight;
-  if (areFourFingersClosed) {
-    // 讚 (四指收起 + 大拇指顯著朝上且與食指分開) -> 自動開蓋 (OPEN_LID)
-    const isThumbUp = (indexPip.y - thumbTip.y) > 0.08;
-
-    if (isThumbUp) {
-      return { name: "讚 👍 (自動開蓋)", cmd: "OPEN_LID" };
+      return { name: "未辨識手勢...", cmd: "UNKNOWN" };
     }
 
-    // 石頭 (四指收起 + 大拇指沒有豎起) -> 煞車停止 (STOP)
-    return { name: "石頭 ✊ (煞車停止)", cmd: "STOP" };
-  }
-
-  return { name: "未辨識手勢...", cmd: "UNKNOWN" };
-}
-
-    // 更新網頁 UI
+    // 更新網網頁 UI 卡片高亮
     function updateCardHighlight(activeCmd) {
       document.querySelectorAll('.card').forEach(card => card.classList.remove('active'));
       if (activeCmd && activeCmd !== "UNKNOWN") {
