@@ -4,6 +4,7 @@ BinGo 智慧垃圾桶專題的 MQTT Server 模組。
 
 此模組運行於 Raspberry Pi，透過 Mosquitto MQTT Broker 接收手勢辨識端傳送的控制指令，並由 Node.js MQTT Server 進行後續處理。
 
+這份 README 是我 MQTT Server 的使用說明，主要寫 MQTT 架構、怎麼安裝環境、怎麼啟動 Server、Topic 跟指令格式。之後你們如果要在別台 Raspberry Pi 跑我的 MQTT Server，照README的步驟就可以把環境架起來。
 目前支援的控制指令：
 
 - `COME`：垃圾桶開始跟隨
