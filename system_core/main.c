@@ -6,11 +6,14 @@
 #include <termios.h>
 #include <pthread.h>
 #include <mosquitto.h>
+#include <sys/stat.h>
 
 #define SERIAL_PORT "/dev/ttyACM0"
 #define MQTT_HOST "127.0.0.1"
 #define MQTT_PORT 1883
 #define MQTT_TOPIC "bingo/command"
+#define FIFO_PATH "/tmp/dht11_fifo"
+#define DRIVER_PATH "/dev/dht11"
 
 typedef enum {
     CAR_STOPPED,
@@ -62,7 +65,7 @@ void process_command(const char *cmd) {
     pthread_mutex_unlock(&state_mutex);
 }
 
-// MQTT 收到訊息時的回呼函式 (Callback)
+// MQTT 收到訊息時的回呼函式
 void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg) {
     if (msg->payloadlen) {
         char cmd[64] = {0};
@@ -72,7 +75,7 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
     }
 }
 
-// 【Thread 1】MQTT 接收線路 (保留網頁/鏡頭控制)
+// 【Thread 1】MQTT 接收線路
 void* mqtt_thread(void *arg) {
     mosquitto_lib_init();
     struct mosquitto *mosq = mosquitto_new("rpi5_core", true, NULL);
@@ -99,7 +102,7 @@ void* mqtt_thread(void *arg) {
     return NULL;
 }
 
-// 【Thread 2】Pico W 超音波距離監控線路 (配合 Distance: XX.XX cm 格式)
+// 【Thread 2】Pico W 超音波距離監控線路
 void* pico_serial_thread(void *arg) {
     int fd = init_serial(SERIAL_PORT);
     if (fd < 0) {
@@ -117,13 +120,10 @@ void* pico_serial_thread(void *arg) {
             if (ch == '\n' || ch == '\r') {
                 buf[idx] = '\0';
                 
-                // 比對 "Distance:" 開頭 (Pico W 傳出的格式)
                 if (strncmp(buf, "Distance:", 9) == 0) {
-                    // atof(buf + 9) 會自動跳過 "Distance:" 與空格，直接解析數字
                     float dist = atof(buf + 9); 
                     
                     pthread_mutex_lock(&state_mutex);
-                    // 當車子處於 CAR_MOVING 狀態且超音波測得距離 <= 20cm 時觸發
                     if (current_state == CAR_MOVING && dist > 0.0f && dist <= 20.0f) {
                         printf("\n🚨 [超音波觸發] 檢測到前方障礙物 (距離: %.2f cm <= 20cm)！緊急搶佔控制權！\n", dist);
                         execute_action("STOP");
@@ -144,14 +144,13 @@ void* pico_serial_thread(void *arg) {
     return NULL;
 }
 
-// 【Thread 3】新增：終端機鍵盤輸入監控線路 (無鏡頭時測試用)
+// 【Thread 3】終端機鍵盤輸入監控線路
 void* terminal_input_thread(void *arg) {
     char input_buf[128];
     printf("⌨️  終端機手動控制已就緒！(可直接輸入 COME / STOP / OPEN_LID 並按 Enter)\n");
 
     while (1) {
         if (fgets(input_buf, sizeof(input_buf), stdin) != NULL) {
-            // 移除換行符號
             input_buf[strcspn(input_buf, "\r\n")] = 0;
             
             if (strlen(input_buf) > 0) {
@@ -163,22 +162,53 @@ void* terminal_input_thread(void *arg) {
     return NULL;
 }
 
+// 【Thread 4】DHT11 IPC & Driver 接收線路
+void* dht11_ipc_thread(void *arg) {
+    // 建立 IPC Pipe 管道
+    mkfifo(FIFO_PATH, 0666);
+    printf("🌡️ DHT11 IPC 接收管道已就緒: %s\n", FIFO_PATH);
+
+    char buf[128];
+    while (1) {
+        int fifo_fd = open(FIFO_PATH, O_RDONLY);
+        if (fifo_fd >= 0) {
+            int bytes_read = read(fifo_fd, buf, sizeof(buf) - 1);
+            if (bytes_read > 0) {
+                buf[bytes_read] = '\0';
+                printf("🌡️ [DHT11 即時數據]: %s", buf);
+
+                // 將數據寫入 Kernel Driver 節點 (/dev/dht11)
+                int driver_fd = open(DRIVER_PATH, O_WRONLY);
+                if (driver_fd >= 0) {
+                    write(driver_fd, buf, strlen(buf));
+                    close(driver_fd);
+                }
+            }
+            close(fifo_fd);
+        }
+        usleep(500000); // 500ms 輪詢
+    }
+    return NULL;
+}
+
 int main(void) {
-    pthread_t t_mqtt, t_serial, t_terminal;
+    pthread_t t_mqtt, t_serial, t_terminal, t_dht11;
 
     printf("=========================================\n");
-    printf(" RPi 5 - BinGo 主控制系統 (MQTT + Pico W) \n");
+    printf(" RPi 5 - BinGo 主控制系統 (MQTT + Pico W + DHT11 Driver) \n");
     printf("=========================================\n");
 
-    // 建立 3 個平行運行的 Thread
+    // 建立 4 個平行運行的 Thread
     pthread_create(&t_mqtt, NULL, mqtt_thread, NULL);
     pthread_create(&t_serial, NULL, pico_serial_thread, NULL);
     pthread_create(&t_terminal, NULL, terminal_input_thread, NULL);
+    pthread_create(&t_dht11, NULL, dht11_ipc_thread, NULL);
 
     // 等待 Thread
     pthread_join(t_mqtt, NULL);
     pthread_join(t_serial, NULL);
     pthread_join(t_terminal, NULL);
+    pthread_join(t_dht11, NULL);
 
     return 0;
 }

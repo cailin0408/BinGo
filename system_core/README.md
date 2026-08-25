@@ -8,6 +8,7 @@
   - **Thread 1 (主邏輯與 FSM 控制)**：監聽 IPC / MQTT 指令，驅動系統狀態轉移（IDLE → MOVING → ARRIVED → RETURN）。
   - **Thread 2 (高頻安全監控)**：背景高頻率讀取超音波感測器數據，實現即時避障。
   - **Thread 3 (鍵盤輸入監控 / 偵錯模式)**：當環境無相機鏡頭或硬體測試階段時，提供終端機鍵盤輸入監控，可手動輸入指令測試狀態機轉移。
+  - **Thread 4 (溫溼度感測driver)**：背景高頻率監測溫溼度。
 - **Mosquitto MQTT 通訊**：連結 MQTT Broker 進行動態指令訂閱與系統狀態回傳。
 - **Mutex 記憶體鎖 (Data Synchronization)**：保護共享之 FSM 狀態變數與車輛控制指令，防止 Data Race。
 - **即時安全避障 (Safety Interrupt)**：當感測距離小於防撞安全閾值 (20 cm) 時，Thread 2 補充或搶佔控制鎖，將系統強制切換至緊急煞車狀態。
