@@ -1,0 +1,5 @@
+node_modules/
+pico/
+*.tar.gz
+PROJECT_CONTEXT.md
+gesture/handTracking.html
