@@ -1,16 +1,17 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/pwm.h"
 #include "lwip/apps/mqtt.h"
 
 // ================= 網路與硬體設定 =================
-#define WIFI_SSID "iSpan-R309"       // 填入你的 Wi-Fi 名稱
-#define WIFI_PASS "66316588"         // 填入你的 Wi-Fi 密碼
+#define WIFI_SSID "iSpan-R309"        // 填入你的 Wi-Fi 名稱
+#define WIFI_PASS "66316588"          // 填入你的 Wi-Fi 密碼
 #define MQTT_BROKER_IP "192.168.69.144"  // 樹莓派 IP (MQTT Broker)
 
-// #define WIFI_SSID "Yuki"       // 填入你的 Wi-Fi 名稱
+// #define WIFI_SSID "Yuki"        // 填入你的 Wi-Fi 名稱
 // #define WIFI_PASS "0952719452"         // 填入你的 Wi-Fi 密碼
 // #define MQTT_BROKER_IP "192.168.0.135"  // 樹莓派 IP (MQTT Broker)
 
@@ -38,47 +39,59 @@ void set_servo_angle(float angle) {
     printf(">> 馬達轉至 %.1f 度 (Duty: %d us)\n", angle, duty_us);
 }
 
+// ================= 指令解析核心 logic =================
+void process_command(const char *cmd) {
+    if (strcasecmp(cmd, "OPEN_LID") == 0 || strcasecmp(cmd, "open") == 0) {
+        set_servo_angle(90.0f); // 掀蓋 90 度
+    } else if (strcasecmp(cmd, "STOP") == 0 || strcasecmp(cmd, "close") == 0) {
+        set_servo_angle(0.0f);  // 關蓋 0 度
+    } else {
+        // 解析數字角度 (例如 "45", "135", "90.5")
+        float angle = atof(cmd);
+        if (angle != 0.0f || strcmp(cmd, "0") == 0 || strcmp(cmd, "0.0") == 0) {
+            set_servo_angle(angle);
+        } else {
+            printf("未知指令或角度格式錯誤: %s\n", cmd);
+        }
+    }
+}
+
 // ================= MQTT Payload 處理 =================
 static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags) {
     char payload[64] = {0};
-    if (len < sizeof(payload)) {
+    if (len < sizeof(payload) - 1) {
         memcpy(payload, data, len);
         payload[len] = '\0';
     }
 
-    printf("📩 [Wi-Fi MQTT 收到指令]: %s\n", payload);
-
-    if (strcasecmp(payload, "OPEN_LID") == 0 || strcasecmp(payload, "open") == 0) {
-        set_servo_angle(90.0f); // 掀蓋 90 度
-    } else if (strcasecmp(payload, "STOP") == 0 || strcasecmp(payload, "close") == 0) {
-        set_servo_angle(0.0f);  // 關蓋 0 度
-    }
+    printf("[Wi-Fi MQTT 收到指令]: %s\n", payload);
+    process_command(payload);
 }
 
 static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len) {
-    printf("📡 收到 Topic: %s (長度: %d)\n", topic, tot_len);
+    printf("收到 Topic: %s (長度: %d)\n", topic, tot_len);
 }
 
 // 訂閱結果回應 Callback
 static void mqtt_sub_request_cb(void *arg, err_t err) {
     if (err == ERR_OK) {
-        printf("✅ MQTT Topic 訂閱確認成功！\n");
+        printf("MQTT Topic 訂閱確認成功！\n");
     } else {
-        printf("❌ MQTT 訂閱失敗，錯誤碼: %d\n", err);
+        printf("MQTT 訂閱失敗，錯誤碼: %d\n", err);
     }
 }
 
 // ================= MQTT 連線 Callback =================
 static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status) {
     if (status == MQTT_CONNECT_ACCEPTED) {
-        printf("✅ 成功連線至 Mosquitto MQTT Broker！\n");
+        printf("成功連線至 Mosquitto MQTT Broker！\n");
         mqtt_set_inpub_callback(client, mqtt_incoming_publish_cb, mqtt_incoming_data_cb, NULL);
         
-        // 修改：傳入正確的 mqtt_sub_request_cb
+        // 訂閱指令頻道
         mqtt_sub_unsub(client, "bingo/command", 0, mqtt_sub_request_cb, NULL, 1);
-        printf("📡 已發送訂閱請求 Topic: [bingo/command]\n");
+        printf("已發送訂閱請求 Topic: [bingo/command]\n");
     } else {
-        printf("❌ MQTT 連線失敗，錯誤代碼: %d\n", status);
+        printf("MQTT 連線失敗，錯誤代碼: %d\n", status);
     }
 }
 
@@ -98,17 +111,17 @@ int main() {
 
     // 2. 初始化 Wi-Fi 晶片
     if (cyw43_arch_init()) {
-        printf("❌ Wi-Fi 晶片初始化失敗\n");
+        printf("Wi-Fi 晶片初始化失敗\n");
         return 1;
     }
     cyw43_arch_enable_sta_mode();
 
-    printf("⏳ 正在連接 Wi-Fi: %s ...\n", WIFI_SSID);
+    printf("正在連接 Wi-Fi: %s ...\n", WIFI_SSID);
     if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS, CYW43_AUTH_WPA2_AES_PSK, 30000)) {
-        printf("❌ Wi-Fi 連線失敗！\n");
+        printf("Wi-Fi 連線失敗！\n");
         return 1;
     }
-    printf("✅ Wi-Fi 連線成功！\n");
+    printf("Wi-Fi 連線成功！\n");
 
     // 3. 連接 MQTT Broker
     ip_addr_t broker_ip;
@@ -127,10 +140,32 @@ int main() {
     // 點亮板載 LED 代表系統運作正常
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
-    // 4. 主迴圈
+    // 4. 主迴圈 (同時監聽 Serial 與 MQTT)
+    char serial_buf[64];
+    int buf_idx = 0;
+
+    printf("系統已就緒！可透過 Serial Monitor 或 MQTT 發送指令 (如: OPEN_LID, STOP, 45, 90, 180)\n");
+
     while (true) {
+        // 輪詢 Wi-Fi/MQTT 網路事件
         cyw43_arch_poll();
-        sleep_ms(10); // 縮短輪詢間隔，讓 MQTT 接收反應更靈敏
+
+        // 讀取 Serial Monitor (USB 序列埠) 輸入
+        int c = getchar_timeout_us(0); // 非阻塞式讀取
+        if (c != PICO_ERROR_TIMEOUT) {
+            if (c == '\r' || c == '\n') {
+                if (buf_idx > 0) {
+                    serial_buf[buf_idx] = '\0';
+                    printf("[Serial 收到指令]: %s\n", serial_buf);
+                    process_command(serial_buf);
+                    buf_idx = 0; // 重置緩衝區
+                }
+            } else if (buf_idx < sizeof(serial_buf) - 1) {
+                serial_buf[buf_idx++] = (char)c;
+            }
+        }
+
+        sleep_ms(10); // 縮短輪詢間隔，讓接收反應更靈敏
     }
 
     return 0;
