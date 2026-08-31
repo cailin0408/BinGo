@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BinGo!! - 語音控制台 (MQTT 連線版)</title>
+
+    <!-- 引入 MQTT.js CDN 套件 -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+    <style>
+      * { box-sizing: border-box; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        text-align: center;
+        background-color: #1e1e2e;
+        color: #cdd6f4;
+        margin: 0;
+        padding: 20px;
+      }
+
+      h1 { color: #89b4fa; margin-bottom: 5px; }
+      p { color: #a6adc8; margin-top: 0; }
+
+      #control_panel {
+        margin: 15px 0;
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        font-size: 16px;
+        font-weight: bold;
+        padding: 12px 24px;
+        cursor: pointer;
+        border: none;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+        transition: all 0.2s ease;
+      }
+
+      #connect_btn { background-color: #89b4fa; color: #11111b; }
+      #connect_btn:hover { background-color: #b4befe; transform: translateY(-2px); }
+
+      #listen_btn { background-color: #a6e3a1; color: #11111b; }
+      #listen_btn:hover { background-color: #94e2d5; transform: translateY(-2px); }
+      #listen_btn.listening { background-color: #f38ba8; }
+
+      #lang_toggle_btn { background-color: #cba6f7; color: #11111b; }
+      #lang_toggle_btn:hover { background-color: #b4a0e5; transform: translateY(-2px); }
+
+      button:disabled {
+        background-color: #585b70 !important;
+        color: #a6adc8 !important;
+        cursor: not-allowed;
+        transform: none !important;
+      }
+
+      #transcript_box {
+        font-size: 22px;
+        font-weight: bold;
+        color: #f9e2af;
+        margin: 15px 0;
+        min-height: 32px;
+      }
+
+      #mqtt_status {
+        font-size: 15px;
+        color: #f38ba8;
+        margin-bottom: 10px;
+      }
+
+      #last_command {
+        font-size: 18px;
+        color: #a6e3a1;
+        margin: 10px 0;
+        min-height: 24px;
+      }
+
+      .cmd-guide {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        margin: 20px auto 0;
+        max-width: 720px;
+        flex-wrap: wrap;
+      }
+
+      .card {
+        background: #313244;
+        border: 2px solid #45475a;
+        border-radius: 10px;
+        padding: 12px 16px;
+        color: #cdd6f4;
+        text-align: center;
+        min-width: 110px;
+      }
+
+      .card .keyword { font-weight: bold; color: #89b4fa; font-size: 16px; }
+      .card .cmd { font-size: 13px; color: #a6adc8; margin-top: 4px; }
+      .card.active { border-color: #a6e3a1; background: #45475a; transform: scale(1.05); }
+
+      #settings {
+        margin-top: 25px;
+        font-size: 13px;
+        color: #6c7086;
+      }
+      #settings input {
+        background: #313244;
+        border: 1px solid #45475a;
+        color: #cdd6f4;
+        border-radius: 4px;
+        padding: 4px 8px;
+        width: 140px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>🎙️ BinGo!! - 語音控制台</h1>
+    <p>對著麥克風說出關鍵字，語音會透過 MQTT 傳送指令</p>
+
+    <div id="control_panel">
+      <button id="connect_btn">🔌 連接 MQTT Broker</button>
+      <button id="listen_btn" disabled>🎤 開始聆聽</button>
+      <button id="lang_toggle_btn">🌐 目前語言：中文</button>
+    </div>
+
+    <div id="mqtt_status">❌ MQTT 服務：未連線</div>
+    <div id="transcript_box">尚未偵測到語音...</div>
+    <div id="last_command">最後送出指令：（無）</div>
+
+    <div class="cmd-guide">
+      <div class="card" id="card-FORWARD">
+        <div class="keyword">前進 / 過來<br />forward / come</div>
+        <div class="cmd">→ FORWARD</div>
+      </div>
+      <div class="card" id="card-BACKWARD">
+        <div class="keyword">後退<br />backward / reverse</div>
+        <div class="cmd">→ BACKWARD</div>
+      </div>
+      <div class="card" id="card-LEFT">
+        <div class="keyword">左轉<br />left</div>
+        <div class="cmd">→ LEFT</div>
+      </div>
+      <div class="card" id="card-RIGHT">
+        <div class="keyword">右轉<br />right</div>
+        <div class="cmd">→ RIGHT</div>
+      </div>
+      <div class="card" id="card-STOP">
+        <div class="keyword">停止 / 停<br />stop</div>
+        <div class="cmd">→ STOP</div>
+      </div>
+      <div class="card" id="card-SPEED_UP">
+        <div class="keyword">加速<br />speed up / faster</div>
+        <div class="cmd">→ SPEED:90</div>
+      </div>
+      <div class="card" id="card-SPEED_DOWN">
+        <div class="keyword">減速<br />slow down / slower</div>
+        <div class="cmd">→ SPEED:30</div>
+      </div>
+    </div>
+
+    <div id="settings">
+      <label>樹莓派 IP：</label>
+      <input type="text" id="rpi_ip_input" value="172.20.10.3" />
+      &nbsp;&nbsp;
+      <label>Topic：</label>
+      <input type="text" id="topic_input" value="bingo/pico_practice" />
+    </div>
+
+    <script>
+      const connectBtn = document.getElementById("connect_btn");
+      const listenBtn = document.getElementById("listen_btn");
+      const langToggleBtn = document.getElementById("lang_toggle_btn");
+      const mqttStatusText = document.getElementById("mqtt_status");
+      const transcriptBox = document.getElementById("transcript_box");
+      const lastCommandDiv = document.getElementById("last_command");
+      const rpiIpInput = document.getElementById("rpi_ip_input");
+      const topicInput = document.getElementById("topic_input");
+
+      const MQTT_PORT = 9001; // Mosquitto 支援 WebSocket 的埠號
+
+      let mqttClient = null;
+      let recognition = null;
+      let isListening = false;
+      let lastCmd = "";
+
+      // 可切換的語言清單：中文(台灣) 與 英式英文
+      const LANGUAGES = [
+        { code: "zh-TW", label: "中文" },
+        { code: "en-GB", label: "英文" },
+      ];
+      let currentLangIndex = 0;
+
+      // ================= MQTT (over WebSocket) 連線邏輯 =================
+      connectBtn.addEventListener("click", () => {
+        const rpiIp = rpiIpInput.value.trim();
+        if (!rpiIp) {
+          alert("請先輸入樹莓派 IP");
+          return;
+        }
+
+        mqttStatusText.innerText = "⏳ 正在連接 MQTT Broker...";
+        mqttStatusText.style.color = "#f9e2af";
+
+        mqttClient = mqtt.connect(`ws://${rpiIp}:${MQTT_PORT}`);
+
+        mqttClient.on("connect", () => {
+          connectBtn.innerText = "✅ MQTT 已成功連線";
+          connectBtn.disabled = true;
+          listenBtn.disabled = false;
+
+          mqttStatusText.innerText = `🟢 MQTT 已連線至 ws://${rpiIp}:${MQTT_PORT}`;
+          mqttStatusText.style.color = "#a6e3a1";
+          console.log("[MQTT] 連線成功");
+        });
+
+        mqttClient.on("error", (err) => {
+          console.error("MQTT 連線錯誤:", err);
+          mqttStatusText.innerText = "❌ MQTT 連線失敗，請檢查 Mosquitto Broker！";
+          mqttStatusText.style.color = "#f38ba8";
+        });
+
+        mqttClient.on("close", () => {
+          console.log("MQTT 連線關閉");
+        });
+      });
+
+      function sendCmdViaMQTT(cmd) {
+        const topic = topicInput.value.trim() || "bingo/pico_practice";
+
+        if (!mqttClient || !mqttClient.connected) {
+          console.warn("[MQTT 未連線] 指令暫未發送:", cmd);
+          return;
+        }
+
+        mqttClient.publish(topic, cmd, { qos: 0 }, (err) => {
+          if (!err) {
+            console.log(`[MQTT 發送成功] Topic: ${topic} ➔ Payload: ${cmd}`);
+            lastCommandDiv.innerText = `最後送出指令：${cmd}`;
+          } else {
+            console.error("MQTT 發送失敗:", err);
+          }
+        });
+      }
+
+      // ================= 語音辨識設定 (Web Speech API) =================
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+      function updateCardHighlight(activeCardId) {
+        document.querySelectorAll(".card").forEach((card) => card.classList.remove("active"));
+        if (activeCardId) {
+          const el = document.getElementById(`card-${activeCardId}`);
+          if (el) el.classList.add("active");
+        }
+      }
+
+      function parseAndSend(transcript) {
+        let cmd = null;
+        let cardId = null;
+
+        // 同時比對中文與英文關鍵字，英文統一轉小寫以避免大小寫不一致造成誤判
+        const t = transcript.toLowerCase();
+
+        if (
+          t.includes("前進") || t.includes("過來") ||
+          t.includes("forward") || t.includes("come")
+        ) {
+          cmd = "FORWARD";
+          cardId = "FORWARD";
+        } else if (
+          t.includes("後退") ||
+          t.includes("backward") || t.includes("back up") || t.includes("reverse")
+        ) {
+          cmd = "BACKWARD";
+          cardId = "BACKWARD";
+        } else if (t.includes("左轉") || t.includes("left")) {
+          cmd = "LEFT";
+          cardId = "LEFT";
+        } else if (t.includes("右轉") || t.includes("right")) {
+          cmd = "RIGHT";
+          cardId = "RIGHT";
+        } else if (
+          t.includes("停止") || t.includes("停") || t.includes("stop")
+        ) {
+          cmd = "STOP";
+          cardId = "STOP";
+        } else if (
+          t.includes("加速") ||
+          t.includes("speed up") || t.includes("faster")
+        ) {
+          cmd = "SPEED:90";
+          cardId = "SPEED_UP";
+        } else if (
+          t.includes("減速") ||
+          t.includes("slow down") || t.includes("slower")
+        ) {
+          cmd = "SPEED:30";
+          cardId = "SPEED_DOWN";
+        }
+
+        if (cmd) {
+          sendCmdViaMQTT(cmd);
+          updateCardHighlight(cardId);
+          lastCmd = cmd;
+
+          // 短暫顯示高亮後淡出
+          setTimeout(() => updateCardHighlight(null), 1200);
+        }
+      }
+
+      if (!SpeechRecognition) {
+        transcriptBox.innerText = "此瀏覽器不支援語音辨識，請改用電腦版 Chrome";
+        listenBtn.disabled = true;
+      } else {
+        recognition = new SpeechRecognition();
+        recognition.lang = LANGUAGES[currentLangIndex].code;
+        recognition.continuous = true;
+        recognition.interimResults = false;
+
+        recognition.onresult = (event) => {
+          const transcript = event.results[event.results.length - 1][0].transcript.trim();
+          console.log("聽到:", transcript);
+          transcriptBox.innerText = `辨識結果：「${transcript}」`;
+          parseAndSend(transcript);
+        };
+
+        recognition.onerror = (event) => {
+          console.error("語音辨識錯誤:", event.error);
+          // no-speech 是常見的正常情況（安靜片刻），不特別顯示錯誤
+          if (event.error !== "no-speech") {
+            transcriptBox.innerText = `語音辨識發生錯誤：${event.error}`;
+          }
+        };
+
+        recognition.onend = () => {
+          // continuous 模式下瀏覽器有時會自動中斷，若仍在聆聽狀態就重新啟動
+          if (isListening) {
+            recognition.start();
+          }
+        };
+
+        listenBtn.addEventListener("click", () => {
+          if (!isListening) {
+            recognition.start();
+            isListening = true;
+            listenBtn.innerText = "⏹️ 停止聆聽";
+            listenBtn.classList.add("listening");
+            transcriptBox.innerText = "🎤 聆聽中，請說出指令...";
+          } else {
+            recognition.stop();
+            isListening = false;
+            listenBtn.innerText = "🎤 開始聆聽";
+            listenBtn.classList.remove("listening");
+            transcriptBox.innerText = "已停止聆聽";
+          }
+        });
+
+        langToggleBtn.addEventListener("click", () => {
+          currentLangIndex = (currentLangIndex + 1) % LANGUAGES.length;
+          const newLang = LANGUAGES[currentLangIndex];
+          recognition.lang = newLang.code;
+          langToggleBtn.innerText = `🌐 目前語言：${newLang.label}`;
+
+          // 切換語言時，若正在聆聽中，需要重啟辨識才會套用新語言設定
+          if (isListening) {
+            recognition.stop();
+            // onend 會自動重新 start()，此時 recognition.lang 已經是新的值
+          }
+
+          transcriptBox.innerText = `已切換語言為：${newLang.label}`;
+        });
+      }
+    </script>
+  </body>
+</html>
