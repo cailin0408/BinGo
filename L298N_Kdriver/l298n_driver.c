@@ -16,7 +16,7 @@
 
 // 樹莓派 BCM GPIO 腳位（對應到 pinctrl-rp1 上的 line offset，Pi5 上兩者數字相同）
 #define GPIO_ENA_OFFSET  16  // 左馬達 Enable
-#define GPIO_IN1_OFFSET  17
+#define GPIO_IN1_OFFSET  5
 #define GPIO_IN2_OFFSET  27
 #define GPIO_IN3_OFFSET  22
 #define GPIO_IN4_OFFSET  23
