@@ -12,7 +12,7 @@
 #define MQTT_HOST "127.0.0.1"
 #define MQTT_PORT 1883
 #define MQTT_SUB_TOPIC "bingo/command"
-#define MQTT_PUB_TOPIC "bingo/status"
+#define MQTT_PUB_TOPIC "bingo/command"
 #define FIFO_PATH "/tmp/dht11_fifo"
 #define DRIVER_PATH "/dev/dht11"
 
@@ -60,29 +60,39 @@ void execute_action(const char *cmd) {
 // 統一的指令處理解析
 void process_command(const char *cmd) {
     pthread_mutex_lock(&state_mutex);
-    if (strstr(cmd, "COME")) {
-        current_state = CAR_MOVING;
-        printf("\n[系統狀態] 收到 COME ➔ 車子啟動前進跟隨...\n");
-        execute_action("COME");
-        mqtt_publish_status("STATE:CAR_MOVING");
-    } else if (strstr(cmd, "STOP")) {
-        current_state = CAR_IDLE;
-        printf("\n[系統狀態] 收到 STOP ➔ 煞車停止並關蓋 (0°)\n");
-        execute_action("STOP");
-        mqtt_publish_status("STATE:CAR_STOPPED");
-    } else if (strstr(cmd, "OPEN_LID")) {
-        current_state = CAR_ARRIVED;
-        printf("\n[系統狀態] 收到 OPEN_LID ➔ 自動掀蓋 (90°)\n");
-        execute_action("OPEN_LID");
-        mqtt_publish_status("STATE:CAR_OPEN_LID");
-    } else if (strstr(cmd, "RETURN")) {
-        current_state = CAR_RETURNING;
-        printf("\n[系統狀態] 收到 RETURN ➔ 車子開始返航回到原點...\n");
-        execute_action("RETURN");
-        mqtt_publish_status("STATE:CAR_RETURNING");
-    } else {
+    
+    if (strstr(cmd, "OPEN_LID")) {
+        if (current_state != CAR_ARRIVED) {
+            current_state = CAR_ARRIVED;
+            printf("\n[系統狀態] 收到 OPEN_LID ➔ 自動掀蓋 (90°)\n");
+            execute_action("OPEN_LID");
+        }
+    } 
+    else if (strstr(cmd, "STOP")) {
+        if (current_state != CAR_IDLE && current_state != CAR_RETURNED) {
+            current_state = CAR_IDLE;
+            printf("\n[系統狀態] 收到 STOP ➔ 煞車停止並關蓋 (0°)\n");
+            execute_action("STOP");
+        }
+    } 
+    else if (strstr(cmd, "COME")) {
+        if (current_state != CAR_MOVING) {
+            current_state = CAR_MOVING;
+            printf("\n[系統狀態] 收到 COME ➔ 車子啟動前進跟隨...\n");
+            execute_action("COME");
+        }
+    } 
+    else if (strstr(cmd, "RETURN")) {
+        if (current_state != CAR_RETURNING) {
+            current_state = CAR_RETURNING;
+            printf("\n[系統狀態] 收到 RETURN ➔ 車子開始返航...\n");
+            execute_action("RETURN");
+        }
+    } 
+    else {
         printf("\n⚠️ 未知指令: %s (請輸入: COME, STOP, OPEN_LID, RETURN)\n", cmd);
     }
+
     pthread_mutex_unlock(&state_mutex);
 }
 
@@ -153,8 +163,9 @@ void* pico_serial_thread(void *arg) {
                         current_state = CAR_ARRIVED;
                         
                         // 發送警報與狀態給前端
-                        mqtt_publish_status("ALERT:OBSTACLE_DETECTED");
-                        mqtt_publish_status("STATE:CAR_ARRIVED");
+                        printf("📡 發送 MQTT 狀態: STOP + OPEN_LID\n");
+                        mqtt_publish_status("STOP");
+                        mqtt_publish_status("OPEN_LID");
                     } 
                     // 返航中遇障礙/抵達原點 ➔ 僅煞車，不掀蓋
                     else if (current_state == CAR_RETURNING && dist > 0.0f && dist <= 20.0f) {
@@ -162,7 +173,9 @@ void* pico_serial_thread(void *arg) {
                         execute_action("STOP");
                         current_state = CAR_RETURNED;
                         
-                        mqtt_publish_status("STATE:CAR_RETURNED");
+                        // 直接 Publish STOP 指令
+                        printf("📡 發送 MQTT 狀態: STOP\n");
+                        mqtt_publish_status("STOP");
                     }
                     pthread_mutex_unlock(&state_mutex);
                 }
@@ -221,8 +234,9 @@ void* dht11_thread(void *arg) {
                     // 回傳警報與狀態給前端網頁
                     char alert_msg[64];
                     snprintf(alert_msg, sizeof(alert_msg), "ALERT:OVERHEAT_TEMP_%.1f", temp);
-                    mqtt_publish_status(alert_msg);
-                    mqtt_publish_status("STATE:CAR_ARRIVED");
+                    printf("📡 發送 MQTT 警報: %s\n", alert_msg);
+                    // mqtt_publish_status(alert_msg);
+                    mqtt_publish_status("OPEN_LID");
                     
                     pthread_mutex_unlock(&state_mutex);
                 }
