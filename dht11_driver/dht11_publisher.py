@@ -2,6 +2,7 @@ import time
 import board
 import adafruit_dht
 import os
+import gpiod
 
 FIFO_PATH = "/tmp/dht11_fifo"
 
@@ -15,13 +16,14 @@ dhtDevice = adafruit_dht.DHT11(board.D4)
 print("🟢 [Python DHT11] IPC 發送端已啟動，等待 C 主程式連接...")
 
 while True:
+    # print("正在讀取 DHT11...")
     try:
         temperature_c = dhtDevice.temperature
         humidity = dhtDevice.humidity
 
         if temperature_c is not None and humidity is not None:
-            data_str = f"Temp: {temperature_c:.1f} C, Humidity: {humidity}%"
-            print(f"[DHT11 讀取成功]: {data_str}")
+            data_str = f"Temp: {temperature_c:.1f}, Humidity: {humidity:.1f}"
+            print(f"[Temp: Celsus, Humidity: %]: {data_str}")
 
             # 開啟 FIFO 並寫入數據給 C 語言端
             try:
@@ -34,6 +36,7 @@ while True:
 
     except RuntimeError as error:
         # DHT11 經常會有讀取失敗狀況，持續重試
+        print("讀取失敗，重試中...")
         time.sleep(2.0)
         continue
     except Exception as error:

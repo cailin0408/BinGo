@@ -37,18 +37,24 @@ static int dev_open(struct inode *inodep, struct file *filep) {
 
 static ssize_t dev_read(struct file *filep, char __user *buffer, size_t len, loff_t *offset) {
     int str_len = strlen(dht11_buffer);
-    if (*offset >= str_len) return 0;
+    if (*offset >= str_len) return 0; // 避免 cat 陷入無窮迴圈
 
-    if (len > str_len - *offset) {
-        len = str_len - *offset;
-    }
+    // if (len > str_len - *offset) {
+    //     len = str_len - *offset;
+    // }
 
-    if (copy_to_user(buffer, dht11_buffer + *offset, len)) {
+    // if (copy_to_user(buffer, dht11_buffer + *offset, len)) {
+    //     return -EFAULT;
+    // }
+    if (copy_to_user(buffer, dht11_buffer, str_len)) {
         return -EFAULT;
     }
 
-    *offset += len;
-    return len;
+    // *offset += len;
+    // return len;
+
+    *offset += str_len;
+    return str_len;
 }
 
 static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t len, loff_t *offset) {
