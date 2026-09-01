@@ -11,17 +11,30 @@
 #define SERIAL_PORT "/dev/ttyACM0"
 #define MQTT_HOST "127.0.0.1"
 #define MQTT_PORT 1883
-#define MQTT_TOPIC "bingo/command"
+#define MQTT_SUB_TOPIC "bingo/command"
+#define MQTT_PUB_TOPIC "bingo/status"
 #define FIFO_PATH "/tmp/dht11_fifo"
 #define DRIVER_PATH "/dev/dht11"
 
+// 擴充為完整 FSM 狀態
 typedef enum {
-    CAR_STOPPED,
-    CAR_MOVING
+    CAR_IDLE,       // 待命狀態
+    CAR_MOVING,     // 前進跟隨中
+    CAR_ARRIVED,    // 抵達目的地 (開蓋)
+    CAR_RETURNING,  // 返航歸位中
+    CAR_RETURNED    // 已回到原點
 } CarState;
 
-CarState current_state = CAR_STOPPED;
+CarState current_state = CAR_IDLE;
 pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
+struct mosquitto *g_mosq = NULL; // 全域 MQTT Client 指標供 Publish 使用
+
+// MQTT 發送輔助函式
+void mqtt_publish_status(const char *msg) {
+    if (g_mosq) {
+        mosquitto_publish(g_mosq, NULL, MQTT_PUB_TOPIC, strlen(msg), msg, 0, false);
+    }
+}
 
 // 設定 USB 串列埠 (Baudrate 115200)
 int init_serial(const char *portname) {
@@ -44,23 +57,31 @@ void execute_action(const char *cmd) {
     printf("\n[RPi 5 硬體動作] ---> 執行指令: %s\n", cmd);
 }
 
-// 統一的指令處理解析 (MQTT、終端機輸入與超音波共享)
+// 統一的指令處理解析
 void process_command(const char *cmd) {
     pthread_mutex_lock(&state_mutex);
     if (strstr(cmd, "COME")) {
         current_state = CAR_MOVING;
         printf("\n[系統狀態] 收到 COME ➔ 車子啟動前進跟隨...\n");
         execute_action("COME");
+        mqtt_publish_status("STATE:CAR_MOVING");
     } else if (strstr(cmd, "STOP")) {
-        current_state = CAR_STOPPED;
+        current_state = CAR_IDLE;
         printf("\n[系統狀態] 收到 STOP ➔ 煞車停止並關蓋 (0°)\n");
         execute_action("STOP");
+        mqtt_publish_status("STATE:CAR_STOPPED");
     } else if (strstr(cmd, "OPEN_LID")) {
-        current_state = CAR_STOPPED;
+        current_state = CAR_ARRIVED;
         printf("\n[系統狀態] 收到 OPEN_LID ➔ 自動掀蓋 (90°)\n");
         execute_action("OPEN_LID");
+        mqtt_publish_status("STATE:CAR_OPEN_LID");
+    } else if (strstr(cmd, "RETURN")) {
+        current_state = CAR_RETURNING;
+        printf("\n[系統狀態] 收到 RETURN ➔ 車子開始返航回到原點...\n");
+        execute_action("RETURN");
+        mqtt_publish_status("STATE:CAR_RETURNING");
     } else {
-        printf("\n⚠️ 未知指令: %s (請輸入: COME, STOP, 或 OPEN_LID)\n", cmd);
+        printf("\n⚠️ 未知指令: %s (請輸入: COME, STOP, OPEN_LID, RETURN)\n", cmd);
     }
     pthread_mutex_unlock(&state_mutex);
 }
@@ -75,29 +96,29 @@ void on_message(struct mosquitto *mosq, void *obj, const struct mosquitto_messag
     }
 }
 
-// 【Thread 1】MQTT 接收線路
+// 【Thread 1】MQTT 接收與發送線路
 void* mqtt_thread(void *arg) {
     mosquitto_lib_init();
-    struct mosquitto *mosq = mosquitto_new("rpi5_core", true, NULL);
+    g_mosq = mosquitto_new("rpi5_core", true, NULL);
 
-    if (!mosq) {
+    if (!g_mosq) {
         printf("建立 MQTT Client 失敗！\n");
         return NULL;
     }
 
-    mosquitto_message_callback_set(mosq, on_message);
+    mosquitto_message_callback_set(g_mosq, on_message);
 
-    if (mosquitto_connect(mosq, MQTT_HOST, MQTT_PORT, 60) != MOSQ_ERR_SUCCESS) {
+    if (mosquitto_connect(g_mosq, MQTT_HOST, MQTT_PORT, 60) != MOSQ_ERR_SUCCESS) {
         printf("無法連接至本地 MQTT Broker！\n");
         return NULL;
     }
 
-    mosquitto_subscribe(mosq, NULL, MQTT_TOPIC, 0);
-    printf("🟢 MQTT 客戶端啟動成功，已訂閱 Topic: %s\n", MQTT_TOPIC);
+    mosquitto_subscribe(g_mosq, NULL, MQTT_SUB_TOPIC, 0);
+    printf("🟢 MQTT 客戶端啟動成功，已訂閱 Topic: %s\n", MQTT_SUB_TOPIC);
 
-    mosquitto_loop_forever(mosq, -1, 1);
+    mosquitto_loop_forever(g_mosq, -1, 1);
 
-    mosquitto_destroy(mosq);
+    mosquitto_destroy(g_mosq);
     mosquitto_lib_cleanup();
     return NULL;
 }
@@ -124,11 +145,24 @@ void* pico_serial_thread(void *arg) {
                     float dist = atof(buf + 9); 
                     
                     pthread_mutex_lock(&state_mutex);
+                    // 前進跟隨中遇障礙 ➔ 煞車並掀蓋 (抵達)
                     if (current_state == CAR_MOVING && dist > 0.0f && dist <= 20.0f) {
-                        printf("\n🚨 [超音波觸發] 檢測到前方障礙物 (距離: %.2f cm <= 20cm)！緊急搶佔控制權！\n", dist);
+                        printf("\n🚨 [超音波觸發] 前方障礙 (%.2f cm)！緊急煞車並開啟桶蓋！\n", dist);
                         execute_action("STOP");
                         execute_action("OPEN_LID");
-                        current_state = CAR_STOPPED;
+                        current_state = CAR_ARRIVED;
+                        
+                        // 發送警報與狀態給前端
+                        mqtt_publish_status("ALERT:OBSTACLE_DETECTED");
+                        mqtt_publish_status("STATE:CAR_ARRIVED");
+                    } 
+                    // 返航中遇障礙/抵達原點 ➔ 僅煞車，不掀蓋
+                    else if (current_state == CAR_RETURNING && dist > 0.0f && dist <= 20.0f) {
+                        printf("\n🛑 [返航到達/避障] 前方障礙 (%.2f cm)！返航停止！\n", dist);
+                        execute_action("STOP");
+                        current_state = CAR_RETURNED;
+                        
+                        mqtt_publish_status("STATE:CAR_RETURNED");
                     }
                     pthread_mutex_unlock(&state_mutex);
                 }
@@ -144,17 +178,72 @@ void* pico_serial_thread(void *arg) {
     return NULL;
 }
 
-// 【Thread 3】終端機鍵盤輸入監控線路
+// 【Thread 3】DHT11 溫溼度監控與 Driver 同步線路
+void* dht11_thread(void *arg) {
+    // 建立 IPC Pipe 管道
+    mkfifo(FIFO_PATH, 0666);
+    printf("🌡️ DHT11 溫溼度監控 IPC 接收管道已就緒: %s\n", FIFO_PATH);
+
+    while (1) {
+        int fd = open(FIFO_PATH, O_RDONLY);
+        if (fd < 0) {
+            usleep(500000);
+            continue;
+        }
+
+        char buf[128];
+        ssize_t bytes = read(fd, buf, sizeof(buf) - 1);
+        if (bytes > 0) {
+            buf[bytes] = '\0';
+            
+            // 1. 同步將原始數據寫入 Kernel Driver 節點 (/dev/dht11)
+            int driver_fd = open(DRIVER_PATH, O_WRONLY);
+            if (driver_fd >= 0) {
+                write(driver_fd, buf, strlen(buf));
+                close(driver_fd);
+            }
+
+            // 2. 解析溫溼度數值 (支援 "Temp: 26.5, Humidity: 60.0" 或 "TEMP:26.5,HUM:60.0" 等格式)
+            float temp = 0.0f, hum = 0.0f;
+            if (sscanf(buf, "Temp: %f, Humidity: %f", &temp, &hum) >= 1 || 
+                sscanf(buf, "TEMP:%f,HUM:%f", &temp, &hum) >= 1 || 
+                sscanf(buf, "%f", &temp) >= 1) {
+                
+                // 3. 高溫過熱安全機制驗證 (> 26.0°C)
+                if (temp > 26.0f) {
+                    pthread_mutex_lock(&state_mutex);
+                    printf("\n🔥 [高溫警報] 檢測到溫度 %.1f°C > 26°C！執行緊急防護 (STOP + OPEN_LID)\n", temp);
+                    
+                    execute_action("STOP");
+                    execute_action("OPEN_LID");
+                    current_state = CAR_ARRIVED;
+
+                    // 回傳警報與狀態給前端網頁
+                    char alert_msg[64];
+                    snprintf(alert_msg, sizeof(alert_msg), "ALERT:OVERHEAT_TEMP_%.1f", temp);
+                    mqtt_publish_status(alert_msg);
+                    mqtt_publish_status("STATE:CAR_ARRIVED");
+                    
+                    pthread_mutex_unlock(&state_mutex);
+                }
+            }
+        }
+        close(fd);
+        usleep(1000000); // 每秒檢查輪詢一次
+    }
+    return NULL;
+}
+
+// 【Thread 4】終端機鍵盤輸入監控線路
 void* terminal_input_thread(void *arg) {
     char input_buf[128];
-    printf("⌨️  終端機手動控制已就緒！(可直接輸入 COME / STOP / OPEN_LID 並按 Enter)\n");
+    printf("⌨️ 終端機手動控制已就緒！(可輸入 COME / STOP / OPEN_LID / RETURN)\n");
 
     while (1) {
         if (fgets(input_buf, sizeof(input_buf), stdin) != NULL) {
             input_buf[strcspn(input_buf, "\r\n")] = 0;
-            
             if (strlen(input_buf) > 0) {
-                printf("💻 [終端機輸入] 手動發送指令: %s\n", input_buf);
+                printf("💻 [終端機輸入] 指令: %s\n", input_buf);
                 process_command(input_buf);
             }
         }
@@ -162,53 +251,22 @@ void* terminal_input_thread(void *arg) {
     return NULL;
 }
 
-// 【Thread 4】DHT11 IPC & Driver 接收線路
-void* dht11_ipc_thread(void *arg) {
-    // 建立 IPC Pipe 管道
-    mkfifo(FIFO_PATH, 0666);
-    printf("🌡️ DHT11 IPC 接收管道已就緒: %s\n", FIFO_PATH);
-
-    char buf[128];
-    while (1) {
-        int fifo_fd = open(FIFO_PATH, O_RDONLY);
-        if (fifo_fd >= 0) {
-            int bytes_read = read(fifo_fd, buf, sizeof(buf) - 1);
-            if (bytes_read > 0) {
-                buf[bytes_read] = '\0';
-                printf("🌡️ [DHT11 即時數據]: %s", buf);
-
-                // 將數據寫入 Kernel Driver 節點 (/dev/dht11)
-                int driver_fd = open(DRIVER_PATH, O_WRONLY);
-                if (driver_fd >= 0) {
-                    write(driver_fd, buf, strlen(buf));
-                    close(driver_fd);
-                }
-            }
-            close(fifo_fd);
-        }
-        usleep(500000); // 500ms 輪詢
-    }
-    return NULL;
-}
-
 int main(void) {
-    pthread_t t_mqtt, t_serial, t_terminal, t_dht11;
+    pthread_t t_mqtt, t_serial, t_dht, t_terminal;
 
     printf("=========================================\n");
-    printf(" RPi 5 - BinGo 主控制系統 (MQTT + Pico W + DHT11 Driver) \n");
+    printf(" RPi 5 - BinGo 主控制系統 (FSM + MQTT)   \n");
     printf("=========================================\n");
 
-    // 建立 4 個平行運行的 Thread
     pthread_create(&t_mqtt, NULL, mqtt_thread, NULL);
     pthread_create(&t_serial, NULL, pico_serial_thread, NULL);
+    pthread_create(&t_dht, NULL, dht11_thread, NULL);
     pthread_create(&t_terminal, NULL, terminal_input_thread, NULL);
-    pthread_create(&t_dht11, NULL, dht11_ipc_thread, NULL);
 
-    // 等待 Thread
     pthread_join(t_mqtt, NULL);
     pthread_join(t_serial, NULL);
+    pthread_join(t_dht, NULL);
     pthread_join(t_terminal, NULL);
-    pthread_join(t_dht11, NULL);
 
     return 0;
 }
