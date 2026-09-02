@@ -1,0 +1,20 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2712";
+
+    fragment@0 {
+        target-path = "/";
+
+        __overlay__ {
+            bingo_buzzer {
+                compatible = "bingo,buzzer";
+
+                buzzer-gpios = <&gpio 18 0>;
+
+                status = "okay";
+            };
+        };
+    };
+};
