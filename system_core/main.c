@@ -145,6 +145,9 @@ void* pico_serial_thread(void *arg) {
     char buf[256];
     int idx = 0;
 
+    // 遲滯現象 (Hysteresis) 標記：防止在邊界來回抖動
+    static int is_obstacle_active = 0;
+
     while (1) {
         char ch;
         if (read(fd, &ch, 1) > 0) {
@@ -155,28 +158,45 @@ void* pico_serial_thread(void *arg) {
                     float dist = atof(buf + 9); 
                     
                     pthread_mutex_lock(&state_mutex);
-                    // 前進跟隨中遇障礙 ➔ 煞車並掀蓋 (抵達)
-                    if (current_state == CAR_MOVING && dist > 0.0f && dist <= 20.0f) {
-                        printf("\n🚨 [超音波觸發] 前方障礙 (%.2f cm)！緊急煞車並開啟桶蓋！\n", dist);
-                        execute_action("STOP");
-                        execute_action("OPEN_LID");
-                        current_state = CAR_ARRIVED;
-                        
-                        // 發送警報與狀態給前端
-                        printf("📡 發送 MQTT 狀態: STOP + OPEN_LID\n");
-                        mqtt_publish_status("STOP");
-                        mqtt_publish_status("OPEN_LID");
+                    // 1. 前進跟隨中遇障礙 ➔ 煞車並掀蓋 (抵達)
+                    if (current_state == CAR_MOVING) {
+                        if (dist > 0.0f && dist <= 25.0f && !is_obstacle_active){
+                            is_obstacle_active = 1; // 標記已觸發障礙
+
+                            printf("\n🚨 [超音波觸發] 前方障礙 (%.2f cm <= 25cm)！緊急煞車並開啟桶蓋！\n", dist);
+                            execute_action("STOP");
+                            execute_action("OPEN_LID");
+                            current_state = CAR_ARRIVED;
+                            
+                            // 發送警報與狀態給前端
+                            printf("📡 發送 MQTT 狀態: STOP + OPEN_LID\n");
+                            mqtt_publish_status("STOP");
+                            mqtt_publish_status("OPEN_LID");
+                        }
                     } 
-                    // 返航中遇障礙/抵達原點 ➔ 僅煞車，不掀蓋
-                    else if (current_state == CAR_RETURNING && dist > 0.0f && dist <= 20.0f) {
-                        printf("\n🛑 [返航到達/避障] 前方障礙 (%.2f cm)！返航停止！\n", dist);
-                        execute_action("STOP");
-                        current_state = CAR_RETURNED;
-                        
-                        // 直接 Publish STOP 指令
-                        printf("📡 發送 MQTT 狀態: STOP\n");
-                        mqtt_publish_status("STOP");
+                    // 2. 返航中遇障礙/抵達原點 ➔ 僅煞車，不掀蓋
+                    else if (current_state == CAR_RETURNING) {
+                        if (dist > 0.0f && dist <= 25.0f && !is_obstacle_active){
+                            is_obstacle_active = 1; // 標記已觸發障礙
+
+                            printf("\n🛑 [返航到達/避障] 前方障礙 (%.2f cm <= 25cm)！返航停止！\n", dist);
+                            execute_action("STOP");
+                            current_state = CAR_RETURNED;
+                            
+                            // 直接 Publish STOP 指令
+                            printf("📡 發送 MQTT 狀態: STOP\n");
+                            mqtt_publish_status("STOP");
+                        }
                     }
+
+                    // ==========================================
+                    // 遲滯現象重置：必須距離拉開至 > 30.0 cm 才解除觸發鎖定
+                    // 防止車子停在 24.9cm ~ 25.1cm 邊界時重複觸發煞車與印出 Message
+                    // ==========================================
+                    if (dist > 30.0f) {
+                        is_obstacle_active = 0;
+                    }
+
                     pthread_mutex_unlock(&state_mutex);
                 }
                 idx = 0;
@@ -184,7 +204,8 @@ void* pico_serial_thread(void *arg) {
                 buf[idx++] = ch;
             }
         } else {
-            usleep(10000); // 10ms
+            // 微調串列埠輪詢延遲為 2ms (提高捕捉反應速度，降低漏測風險)
+            usleep(2000); // 2ms
         }
     }
     close(fd);
