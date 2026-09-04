@@ -16,6 +16,8 @@
 
 // 超音波測距函式
 float get_distance_cm(void) {
+    gpio_put(TRIG_PIN, 0);
+    sleep_us(2);
     gpio_put(TRIG_PIN, 1);
     sleep_us(10);
     gpio_put(TRIG_PIN, 0);
@@ -23,6 +25,7 @@ float get_distance_cm(void) {
     uint32_t timeout = 30000; // 30ms 超時限制
     uint32_t start_time = time_us_32();
 
+    // 等待 Echo 變高電位 (加上防死鎖迴圈)
     while (gpio_get(ECHO_PIN) == 0) {
         if (time_us_32() - start_time > timeout) {
             return -1.0f; // 超時，返回錯誤值
@@ -30,6 +33,7 @@ float get_distance_cm(void) {
     }
     uint32_t echo_start = time_us_32();
 
+    // 等待 Echo 變低電位
     while (gpio_get(ECHO_PIN) == 1) {
         if (time_us_32() - start_time > timeout) {
             return -1.0f; // 超時，返回錯誤值
@@ -61,11 +65,14 @@ int main()
     while (1) {
         float distance = get_distance_cm();
         if (distance > 0.0f) {
-            printf("Distance: %.2f cm\n", distance); // 透過 UART 傳給樹莓派
+            // 印出格式與 RPi 5 的 pico_serial_thread 匹配
+            printf("Distance: %.2f cm\n", distance);
         } else {
-            printf("Distance measurement timeout!\n");
+            // 超時或讀取失敗時，印出預設跳過值
+            printf("Distance: -1.00 cm\n");
         }
-        sleep_ms(1000); // 每秒測量一次
+        // 關鍵修改：改為 50ms (20Hz) 採樣一次，確保微秒級的即時防撞反應
+        sleep_ms(50); // 每50ms測量一次
     }
     return 0;
 }
