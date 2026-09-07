@@ -205,8 +205,13 @@
     let mqttClient = null;
     let isStreamRunning = false;
 
+    // ================= 新增：冷卻時間與狀態控制變數 =================
+    let lastSentCmd = "";         // 記錄上一次成功發出的指令
+    let lastSendTime = 0;         // 記錄上次發送的時間戳記 (毫秒)
+    const CMD_INTERVAL_MS = 1000; // 限制發送間隔為 1000ms (1秒)
+
     //  樹莓派與 MQTT Topic 設定
-    const RPI_IP = '192.168.69.144';  // 測試時改為樹莓派 IP，如 '192.168.1.100'
+    const RPI_IP = '192.168.69.165';  // 測試時改為樹莓派 IP，如 '192.168.1.100'
     const MQTT_PORT = 9001;        // Mosquitto 支援 WebSocket 的埠號
     const MQTT_TOPIC = 'bingo/command'; // 與樹莓派/Pico W 約定好的 Topic
 
@@ -252,22 +257,37 @@
       });
     });
 
-    // 透過 MQTT 發送指令 (Publish)
-    function sendCmdViaMQTT(cmd) {
-      if (!mqttClient || !mqttClient.connected) {
-        console.warn("[MQTT 未連線] 指令暫未發送:", cmd);
-        return;
-      }
+// 透過 MQTT 發送指令 (限流版)
+function sendCmdViaMQTT(cmd) {
+  const now = Date.now();
 
-      // 發送 Topic 訊息
-      mqttClient.publish(MQTT_TOPIC, cmd, { qos: 0 }, (err) => {
-        if (!err) {
-          console.log(`[MQTT 發送成功] Topic: ${MQTT_TOPIC} ➔ Payload: ${cmd}`);
-        } else {
-          console.error("MQTT 發送失敗:", err);
-        }
-      });
+  // 1. 如果與上一次發送的指令相同，直接攔截不重複發送
+  if (cmd === lastSentCmd) {
+    return;
+  }
+
+  // 2. 檢查距離上一次發送時間是否滿 1 秒
+  if (now - lastSendTime < CMD_INTERVAL_MS) {
+    console.log(`[MQTT 頻率限制] 距離上一次發送未滿 1 秒，已忽略指令: ${cmd}`);
+    return;
+  }
+
+  if (!mqttClient || !mqttClient.connected) {
+    console.warn("[MQTT 未連線] 指令暫未發送:", cmd);
+    return;
+  }
+
+  // 3. 條件符合，發送指令並更新紀錄
+  mqttClient.publish(MQTT_TOPIC, cmd, { qos: 0 }, (err) => {
+    if (!err) {
+      console.log(`[MQTT 發送成功] Topic: ${MQTT_TOPIC} ➔ Payload: ${cmd}`);
+      lastSentCmd = cmd;
+      lastSendTime = now;
+    } else {
+      console.error("MQTT 發送失敗:", err);
     }
+  });
+}
 
     // ================= MediaPipe Hands 設定 =================
     const hands = new Hands({
