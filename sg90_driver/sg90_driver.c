@@ -10,7 +10,7 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Eileen");
-MODULE_DESCRIPTION("SG90 Servo Driver for Raspberry Pi 5");
+MODULE_DESCRIPTION("SG90 Servo Driver with Fast & Speed-Up Smooth modes for Raspberry Pi 5");
 
 #define SERVO_PIN_NUM 26
 #define DEVICE_NAME   "sg90_dev"
@@ -21,29 +21,17 @@ static int rp1_gpio_pin = -1;
 static struct class  *sg90_class  = NULL;
 static struct device *sg90_device = NULL;
 
-/* -----------------------------------------------------------------
- * gpiochip_find() 在近期 kernel（含你目前的 6.18）已經被移除，
- * legacy 整數式 GPIO API 沒有簡單的替代函式可以在模組內動態列舉
- * gpiochip。改用 module parameter 讓你在 insmod 時直接指定實際
- * 腳位號碼。  我要這個幹嘛?
- *
- * 查詢方式：
- *   for f in /sys/class/gpio/gpiochip*; do
- *     echo "$f label=$(cat $f/label) base=$(cat $f/base)"
- *   done
- * 找到 label=pinctrl-rp1 那一行的 base，加上想控制的 BCM 腳位號碼
- * （例如 GPIO26）即為正確編號。在這台機器上實測結果是 base=569，
- * 所以 GPIO26 對應到的正確編號是 595（已用 open/close 驗證伺服
- * 馬達會正確轉動）。base 值理論上由 kernel 開機時動態分配，若
- * 之後系統更新、kernel 版本更換，仍建議用上面指令重新查一次，
- * 不要完全依賴這個預設值。
- *
- * 用法： sudo insmod sg90_driver.ko gpio_pin_param=595
- * --------------------------------------------------------------- */
+// 記錄馬達當前的角度（預設 0 度）
+static int current_angle = 0;
+
 static int gpio_pin_param = 595;
 module_param(gpio_pin_param, int, 0444);
-MODULE_PARM_DESC(gpio_pin_param, "Kernel GPIO number for the servo signal pin (find via /sys/class/gpio/gpiochip*/base, label=pinctrl-rp1)");
+MODULE_PARM_DESC(gpio_pin_param, "Kernel GPIO number for the servo signal pin");
 
+/* -------------------------------------------------------------
+ * 1. 原本做法：全速爆衝 (Direct Jump)
+ * 用於對比展示：馬達全速跳到位（蓋子容易噴飛）。
+ * ------------------------------------------------------------- */
 static void set_servo_angle(int angle) {
     int pulse_us;
     int i;
@@ -59,11 +47,45 @@ static void set_servo_angle(int angle) {
         gpio_set_value(rp1_gpio_pin, 1);
         udelay(pulse_us);
         gpio_set_value(rp1_gpio_pin, 0);
-        /* 週期中剩餘的部分交給 usleep_range，
-         * 避免長時間忙等佔用 CPU / 被中斷打斷造成抖動 */
         usleep_range(20000 - pulse_us - 50, 20000 - pulse_us + 50);
     }
-    printk(KERN_INFO "SG90: Set angle to %d (Pulse: %d us)\n", angle, pulse_us);
+
+    current_angle = angle;
+    printk(KERN_INFO "SG90 [FAST]: Set angle directly to %d\n", angle);
+}
+
+/* -------------------------------------------------------------
+ * 2. 加速版平滑做法：加大步階與微縮延遲
+ * 每次跨越 3 度，脈衝週期減為 1 次，反應極快且有緩和效果。
+ * ------------------------------------------------------------- */
+static void set_servo_angle_smooth(int target_angle, int delay_ms) {
+    int angle;
+    int pulse_us;
+
+    if (rp1_gpio_pin < 0) return;
+
+    if (target_angle < 0) target_angle = 0;
+    if (target_angle > 180) target_angle = 180;
+
+    // 將單步跨度加大為 3 度 (大幅提升移動速度)
+    int step = (target_angle > current_angle) ? 3 : -3;
+
+    for (angle = current_angle; (step > 0 ? angle <= target_angle : angle >= target_angle); angle += step) {
+        pulse_us = 600 + (angle * 1000 / 90);
+
+        // 每個步階僅輸出 1 個 PWM 脈衝
+        gpio_set_value(rp1_gpio_pin, 1);
+        udelay(pulse_us);
+        gpio_set_value(rp1_gpio_pin, 0);
+        usleep_range(20000 - pulse_us - 50, 20000 - pulse_us + 50);
+
+        if (delay_ms > 0) {
+            msleep(delay_ms);
+        }
+    }
+
+    current_angle = target_angle;
+    printk(KERN_INFO "SG90 [SMOOTH]: Speed-up moved to angle %d\n", current_angle);
 }
 
 static int dev_open(struct inode *inodep, struct file *filep) {
@@ -79,27 +101,29 @@ static ssize_t dev_write(struct file *filep, const char __user *buffer, size_t l
     kbuf[len] = '\0';
 
     if (strncasecmp(kbuf, "open", 4) == 0) {
-        set_servo_angle(90);
+        // 延遲設為 2ms，開蓋快速俐落且不爆衝
+        set_servo_angle_smooth(90, 2);
     } else if (strncasecmp(kbuf, "close", 5) == 0) {
+        // 延遲設為 1ms，關蓋快速到位
+        set_servo_angle_smooth(0, 1);
+    } else if (strncasecmp(kbuf, "fast_open", 9) == 0) {
+        // 對比展示：原本的全速爆衝開蓋
+        set_servo_angle(90);
+    } else if (strncasecmp(kbuf, "fast_close", 10) == 0) {
+        // 對比展示：原本的全速爆衝關蓋
         set_servo_angle(0);
     } else if (strncasecmp(kbuf, "test", 4) == 0) {
-        /* debug：持續輸出高電位。
-         * 注意：伺服馬達靠脈衝寬度判斷角度，持續高電位不是合法的
-         * PWM 訊號，馬達通常不會轉動——這不代表 GPIO 錯誤，只適合
-         * 用電表量測腳位是否真的有電位變化。要驗證馬達動作請用
-         * "open"/"close" 或直接輸入角度數字。 */
         if (rp1_gpio_pin >= 0) {
             gpio_direction_output(rp1_gpio_pin, 1);
             printk(KERN_INFO "SG90: TEST MODE - pin %d held HIGH\n", rp1_gpio_pin);
         }
     } else if (strncasecmp(kbuf, "test0", 5) == 0) {
-        /* debug：持續輸出低電位 */
         if (rp1_gpio_pin >= 0) {
             gpio_direction_output(rp1_gpio_pin, 0);
             printk(KERN_INFO "SG90: TEST MODE - pin %d held LOW\n", rp1_gpio_pin);
         }
     } else if (kstrtol(kbuf, 10, &angle) == 0) {
-        set_servo_angle((int)angle);
+        set_servo_angle_smooth((int)angle, 2);
     } else {
         printk(KERN_WARNING "SG90: Invalid command\n");
     }
@@ -115,16 +139,12 @@ static struct file_operations fops = {
 static int __init sg90_init(void) {
     int ret;
 
-    /* 1. 註冊字元裝置，取得 major number */
     major_number = register_chrdev(0, DEVICE_NAME, &fops);
     if (major_number < 0) {
         printk(KERN_ALERT "SG90: Failed to register major number\n");
         return major_number;
     }
 
-    /* 2. 建立 class / device，讓 udev 自動生成 /dev/sg90_dev
-     *    這是原本程式最容易讓人卡住的地方：
-     *    沒有這兩步，/dev/sg90_dev 根本不會被建立。 */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
     sg90_class = class_create(CLASS_NAME);
 #else
@@ -144,11 +164,6 @@ static int __init sg90_init(void) {
         return PTR_ERR(sg90_device);
     }
 
-    /* 3. 決定要控制的 GPIO 編號。
-     *    優先使用 insmod 時傳入的 gpio_pin_param（預設 595，已用
-     *    open/close 實測驗證伺服馬達正確轉動）。若之後系統更新
-     *    導致 base 改變，重新用 gpiochip 底下的 base 檔案查
-     *    出新編號，帶入 gpio_pin_param= 覆蓋即可，不需要重編。 */
     rp1_gpio_pin = gpio_pin_param;
     printk(KERN_INFO "SG90: Using GPIO pin: %d\n", rp1_gpio_pin);
 
